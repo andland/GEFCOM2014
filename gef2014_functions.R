@@ -303,7 +303,7 @@ simulate_weather_pca <- function(begin_datetime, end_datetime,
 # functions for training the load models ####
 
 train_load_models_gbm <- function(begin_datetime, end_datetime, quantiles, weather_pca,
-                                  max_trees = 500, shrinkage = 0.15) {
+                                  max_trees = 500, shrinkages = c(0.1,0.3)) {
   library(gbm)
   
   cat("load data\n")
@@ -320,7 +320,8 @@ train_load_models_gbm <- function(begin_datetime, end_datetime, quantiles, weath
   
   cat("run models\n")
   gbms = list()
-  shrinkages = shrinkage * 2^(-2:2)
+  # shrinkages = shrinkage * 2^(-2:2)
+  ptm <- proc.time()
   for (q in quantiles) {
     for (h in 0:23) {
       for (l in 1:2) {
@@ -344,7 +345,7 @@ train_load_models_gbm <- function(begin_datetime, end_datetime, quantiles, weath
           gbm_mod = gbm(LOAD ~ . - Hour, data = dat_gbm,
                         distribution = list(name="quantile", alpha = q),
                         n.trees = max_trees, shrinkage = sh, interaction.depth = 2,
-                        keep.data = FALSE, cv.folds = 8, verbose = F, n.cores = 4)
+                        keep.data = FALSE, cv.folds = 5, verbose = F, n.cores = 5)
           cv_errors[sh==shrinkages] = min(gbm_mod$cv.error)
           
           if(cv_errors[sh==shrinkages] < min_cv_error) {
@@ -355,7 +356,12 @@ train_load_models_gbm <- function(begin_datetime, end_datetime, quantiles, weath
         }
         
         best.iter <- suppressWarnings(gbm.perf(gbm_model, method="cv", plot.it = F))
-        cat("Shrinkage:", min_shrink, "Iters:", best.iter,"\n")
+        cat("Shrinkage:", min_shrink, "Iters:", best.iter,"")
+        
+        time.elapsed=as.numeric(proc.time()-ptm)[3]
+        tot.time=length(quantiles)*24*2/((which(q==quantiles)-1)*24*2+(h)*2+l)*time.elapsed
+        time.remain=tot.time-time.elapsed
+        cat(round(time.elapsed/3600,1),"hours elapsed. Max",round(time.remain/3600,1),"hours remain.\n")
         
         gbms[[paste(q, h, l)]] = gbm_model
       }

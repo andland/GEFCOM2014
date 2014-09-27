@@ -1,7 +1,7 @@
 # setwd("D:/Kaggle/GEFCOM2014/")
 args = commandArgs(TRUE)
 if (length(args)<1) {args[1]="a"}
-if (length(args)<2) {args[2]="1"}
+if (length(args)<2) {args[2]="4"}
 if (length(args)<3) {args[3]="100"}
 if (length(args)<4) {args[4]="1e6"}
 
@@ -16,18 +16,21 @@ nrows = as.numeric(args[4])
 
 cat("dist_method =", dist_method, ", cores =", parallel, "\n")
 
-library(lubridate)
-library(gbm)
-library(reshape2)
-library(gtools)
-library(mgcv)
+suppressMessages(library(lubridate))
+suppressMessages(library(gbm))
+suppressMessages(library(reshape2))
+suppressMessages(library(gtools))
+suppressMessages(library(mgcv))
+
+cat("\nLoading data and functions\n")
 source("gef2014_functions.R")
 load("weather_pca4.RData")
-load("load_models_gbm4.RData")
+load("load_models_gbm5.RData")
+load("load_models_gbm_lag5.RData")
 
-set.seed(20140918)
-pred_begin_datetime = ymd(20110101)+hours(1)
-pred_end_datetime = ymd(20110201)
+set.seed(20140925)
+pred_begin_datetime = ymd(20110201)+hours(1)
+pred_end_datetime = ymd(20110301)
 
 cat("\nSimulating weather data\n")
 weather_sims = simulate_weather_pca(pred_begin_datetime = pred_begin_datetime, 
@@ -46,15 +49,22 @@ pred_sim_quantiles = matrix(NA, nrow(weather_sims_m), length(quantiles),
                             dimnames = list(NULL, quantiles))
 for (h in 0:23) {
   cat("hour",h,"\n")
-  for (l in 1:2) {
+  for (l in 1:3) {
     if (l == 1) {
-      this_hour = (weather_sims_m$Hour == h & !is.na(weather_sims_m$wPCA1_lag_day))
+      this_hour = (weather_sims_m$Hour == h & weather_sims_m$DaysBack == 1)
+    } else if (l == 2) {
+      this_hour = (weather_sims_m$Hour == h & weather_sims_m$DaysBack > 7)
     } else {
-      this_hour = (weather_sims_m$Hour == h & is.na(weather_sims_m$wPCA1_lag_day))
+      this_hour = (weather_sims_m$Hour == h & weather_sims_m$DaysBack >= 2 & weather_sims_m$DaysBack <= 7)
     }
     weather_sims_hour = weather_sims_m[this_hour, ]
     for (q in quantiles) {
-      gbm_model = gbms[[paste(q, h, l)]]
+      if (l %in% c(1,2)) {
+        gbm_model = gbms[[paste(q, h, l)]]
+      } else {
+        gbm_model = gbm_lags[[paste(q, h)]]
+      }
+      
       best.iter <- suppressWarnings(gbm.perf(gbm_model,method="cv", plot.it = FALSE))
       pred_sim_quantiles[this_hour, q==quantiles] = 
         predict(gbm_model, weather_sims_hour, n.trees = best.iter)
@@ -73,7 +83,7 @@ if (nrows < nrow(weather_sims)) {
 cat("\nPredicting distribution\n")
 start_time <- proc.time()
 if (parallel > 1) {
-  library(doMC)
+  suppressMessages(library(doMC))
   registerDoMC(parallel)
   
   # TODO: remove everything from memory I won't need
@@ -98,5 +108,5 @@ if (parallel > 1) {
 cat("Time:", as.numeric(proc.time() - start_time)[3]/60, "minutes")
 
 pred_distribution = data.frame(DateTime = weather_sims$DateTime, pred_distribution)
-write.csv(pred_distribution, paste0("pred3_", paste(args,collapse = "_"), ".csv"), 
+write.csv(pred_distribution, paste0("pred5_", paste(args,collapse = "_"), ".csv"), 
           row.names=FALSE)

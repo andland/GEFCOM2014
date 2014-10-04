@@ -33,7 +33,9 @@ add_holidays <- function(dat) {
   # library(tis) # don't load because `ymd` conflicts with lubridate
   library(lubridate)
   
-  holidays = tis::federalHolidays(2001:2011, board = F, businessOnly = T)
+  major_holidays = c("NewYears", "Memorial", "Independence", "Labor", "Thanksgiving", "Christmas")
+  
+  holidays = tis::federalHolidays(2001:2011, board = T, businessOnly = F)
   holidays = data.frame(Holiday = names(holidays), 
                         Date = ymd(holidays),
                         stringsAsFactors = FALSE)
@@ -42,6 +44,7 @@ add_holidays <- function(dat) {
   dat <- dat[order(dat$DateTime), ]
   dat$IsHoliday <- as.numeric(!is.na(dat$Holiday))
   dat$Holiday[is.na(dat$Holiday)] <- "None"
+  dat$IsMajorHoliday = as.numeric(dat$Holiday %in% major_holidays)
   dat$Holiday = factor(dat$Holiday)
   
   # detach("package:tis", unload=TRUE)
@@ -51,6 +54,9 @@ add_holidays <- function(dat) {
 add_lags <- function(dat, lag_days = 1) {
   # creates a lag variable for weather (wPCA1) and LOAD
   # from last hour of yesterday and same hour of yesterday
+  if (lag_days <= 0) {
+    return(dat)
+  }
   dat_lag_day = subset(dat, , c(DateTime, wPCA1, LOAD))
   dat_lag_day$DateTime = dat_lag_day$DateTime + days(lag_days)
   colnames(dat_lag_day)[2:3] = paste0(colnames(dat_lag_day)[2:3], "_lag_day")
@@ -147,13 +153,13 @@ train_weather_normals <- function(begin_datetime, end_datetime) {
 # normal_models = train_weather_normals()
 # save(normal_models, file = "normal_models3.RData")
 
-train_pca_normals <- function(begin_datetime, end_datetime, weather_pca) {
+train_pca_normals <- function(begin_datetime, end_datetime, weather_pca, which_pc = 1) {
   library(mgcv)
   dat_train = open_data(begin_datetime, end_datetime)
-  dat_train$wPCA1 = predict(weather_pca, dat_train)[, 1]
+  dat_train$wPCA = predict(weather_pca, dat_train)[, which_pc]
   
-  y_train = dat_train$wPCA1
-  form = as.formula("wPCA1 ~ s(DOY, bs = 'cc') + s(Hour, bs = 'cc')")
+  y_train = dat_train$wPCA
+  form = as.formula("wPCA ~ s(DOY, bs = 'cc') + s(Hour, bs = 'cc')")
   
   weights = rep(1, nrow(dat_train))
   fitted_old = rep(mean(y_train), nrow(dat_train))
@@ -207,16 +213,17 @@ predict_normals <- function(begin_datetime, end_datetime, normal_models) {
 # pred_normal = predict_normals(ymd_hms(20101201010000), ymd_hms("20110101 00:00:00"), normal_models)
 # save(pred_normal, file = "normal_preds3.RData")
 
-predict_normal_pca <- function(begin_datetime, end_datetime, normal_models) {
+predict_normal_pca <- function(begin_datetime, end_datetime, normal_models, which_pc = 1) {
   library(lubridate)
   
   num_hours = as.numeric(end_datetime - begin_datetime, units = "hours") + 1
   dat = data.frame(DateTime = begin_datetime + hours(0:(num_hours-1)))
   dat <- add_calendar_fields(dat)
   
-  dat$wPCA1_mean = as.numeric(predict(normal_models[[1]], dat))
-  
-  dat$wPCA1_sd = as.numeric(sqrt(exp(predict(normal_models[[2]], dat))))
+  dat$wPCA_mean = as.numeric(predict(normal_models[[1]], dat))
+  dat$wPCA_sd = as.numeric(sqrt(exp(predict(normal_models[[2]], dat))))
+  colnames(dat)[colnames(dat)=="wPCA_mean"] <- paste0("wPCA", which_pc, "_mean")
+  colnames(dat)[colnames(dat)=="wPCA_sd"] <- paste0("wPCA", which_pc, "_sd")
   
   return(dat)
 }
@@ -233,28 +240,34 @@ simulate_weather_pca <- function(begin_datetime, end_datetime,
   dat_train = open_data(begin_datetime, end_datetime)
   
   dat_train$wPCA1 = predict(weather_pca, dat_train)[, 1]
+  dat_train$wPCA2 = predict(weather_pca, dat_train)[, 2]
   
-  normal_pca_models = train_pca_normals(begin_datetime, end_datetime, weather_pca = weather_pca)
-  fitted_normal_pca = predict_normal_pca(min(dat_train$DateTime), max(dat_train$DateTime), normal_pca_models)
+  normal_pca_models1 = train_pca_normals(begin_datetime, end_datetime, weather_pca = weather_pca, which_pc = 1)
+  normal_pca_models2 = train_pca_normals(begin_datetime, end_datetime, weather_pca = weather_pca, which_pc = 2)
+  fitted_normal_pca1 = predict_normal_pca(min(dat_train$DateTime), max(dat_train$DateTime), normal_pca_models1, which_pc = 1)
+  fitted_normal_pca2 = predict_normal_pca(min(dat_train$DateTime), max(dat_train$DateTime), normal_pca_models2, which_pc = 2)
   
   rows = nrow(dat_train)
-  dat_train = merge(dat_train, subset(fitted_normal_pca, , c(DateTime, wPCA1_mean, wPCA1_sd)))
+  dat_train = merge(dat_train, subset(fitted_normal_pca1, , c(DateTime, wPCA1_mean, wPCA1_sd)))
+  dat_train = merge(dat_train, subset(fitted_normal_pca2, , c(DateTime, wPCA2_mean, wPCA2_sd)))
   if (nrow(dat_train)!=rows) {
     stop("Unsuccessful merge")
   }
   
   dat_train$Resid = with(dat_train, (wPCA1 - wPCA1_mean) / wPCA1_sd)
   dat_train$Resid_Diff = c(NA, diff(dat_train$Resid))
+  dat_train$Resid2 = with(dat_train, (wPCA2 - wPCA2_mean) / wPCA2_sd)
+  dat_train$Resid2_Diff = c(NA, diff(dat_train$Resid2))
   
   dat_start = open_data(pred_begin_datetime - hours(24), pred_begin_datetime - hours(1))
   dat_start$wPCA1 = predict(weather_pca, dat_start)[,1]
-  pred_normal_pca_start = predict_normal_pca(pred_begin_datetime - hours(24), pred_begin_datetime - hours(1), normal_pca_models)
-  wPCA1_resids = (dat_start$wPCA1 - pred_normal_pca_start$wPCA1_mean)/pred_normal_pca_start$wPCA1_sd
+  pred_normal_pca_start = predict_normal_pca(pred_begin_datetime - hours(24), pred_begin_datetime - hours(1), normal_pca_models1, which_pc = 1)
+  wPCA1_resids = (dat_start$wPCA1 - pred_normal_pca_start$wPCA1_mean) / pred_normal_pca_start$wPCA1_sd
   wPCA1_resid_start = wPCA1_resids[length(wPCA1_resids)]
   wPCA1_diff_start = wPCA1_resids[length(wPCA1_resids)] - wPCA1_resids[length(wPCA1_resids) - 1]
   
   
-  pred_normal_pca = predict_normal_pca(pred_begin_datetime, pred_end_datetime, normal_pca_models)
+  pred_normal_pca = predict_normal_pca(pred_begin_datetime, pred_end_datetime, normal_pca_models1, which_pc = 1)
   num_hours = nrow(pred_normal_pca)
   
   # append actuals from the previous day to the prediction data set
@@ -321,16 +334,19 @@ simulate_weather_pca <- function(begin_datetime, end_datetime,
 # functions for training the load models ####
 
 train_load_models_gbm <- function(begin_datetime, end_datetime, quantiles, weather_pca,
-                                  max_trees = 500, shrinkages = c(0.1,0.3)) {
+                                  max_trees = 500, shrinkages = c(0.1,0.3), lag_days = 0) {
   suppressMessages(library(gbm))
   
   cat("load data\n")
   dat_train = open_data(begin_datetime, end_datetime)
   dat_train$wPCA1 = predict(weather_pca, dat_train)[,1]
-  dat_train <- add_lags(dat_train)
+  dat_train <- add_lags(dat_train, lag_days)
   dat_train <- add_holidays(dat_train)
   
-  dat_train = subset(dat_train, !is.na(LOAD) & !is.na(LOAD_lag_day) & !is.na(LOAD_lag_latest))
+  dat_train = subset(dat_train, !is.na(LOAD))
+  if (lag_days > 0) {
+    dat_train = subset(dat_train, !is.na(LOAD_lag_day) & !is.na(LOAD_lag_latest))
+  }
   
   standard_columns = c("LOAD", "wPCA1", "Hour", "MonthFactor", "DOW", "DOY", "Trend", "IsHoliday")
   lag_day_columns = c("wPCA1_lag_day", "LOAD_lag_day")
@@ -340,49 +356,54 @@ train_load_models_gbm <- function(begin_datetime, end_datetime, quantiles, weath
   gbms = list()
   # shrinkages = shrinkage * 2^(-2:2)
   ptm <- proc.time()
+  time_elapsed = rep(NA, length(quantiles) * 24)
   for (q in quantiles) {
     for (h in 0:23) {
-      for (l in 1:2) {
-        cat(q, "", h, "", l, "")
-        
-        columns = if (l==1) {
-          if (h==0) {
-            c(standard_columns, lag_day_columns)
-          } else {
-            c(standard_columns, lag_day_columns, lag_latest_columns)
-          }
+      cat(q, "", h, "")
+      
+      columns = if (lag_days > 0) {
+        if (h==0) {
+          c(standard_columns, lag_day_columns)
         } else {
-          standard_columns
+          c(standard_columns, lag_day_columns, lag_latest_columns)
         }
-        dat_gbm = subset(dat_train, Hour == h, columns)
-        
-        min_cv_error = Inf
-        cv_errors = rep(NA, length(shrinkages))
-        min_shrink = 0
-        for (sh in shrinkages) {
-          gbm_mod = gbm(LOAD ~ . - Hour, data = dat_gbm,
-                        distribution = list(name="quantile", alpha = q),
-                        n.trees = max_trees, shrinkage = sh, interaction.depth = 2,
-                        keep.data = FALSE, cv.folds = 4, verbose = F, n.cores = 4)
-          cv_errors[sh==shrinkages] = min(gbm_mod$cv.error)
-          
-          if(cv_errors[sh==shrinkages] < min_cv_error) {
-            min_cv_error = cv_errors[sh==shrinkages]
-            gbm_model = gbm_mod
-            min_shrink = sh
-          }
-        }
-        
-        best.iter <- suppressWarnings(gbm.perf(gbm_model, method="cv", plot.it = F))
-        cat("Shrinkage:", min_shrink, "Iters:", best.iter,"")
-        
-        time.elapsed=as.numeric(proc.time()-ptm)[3]
-        tot.time=length(quantiles)*24*2/((which(q==quantiles)-1)*24*2+(h)*2+l)*time.elapsed
-        time.remain=tot.time-time.elapsed
-        cat(round(time.elapsed/3600,1),"hours elapsed. Min",round(time.remain/3600,1),"hours remain.\n")
-        
-        gbms[[paste(q, h, l)]] = gbm_model
+      } else {
+        standard_columns
       }
+      dat_gbm = subset(dat_train, Hour == h, columns)
+      
+      min_cv_error = Inf
+      cv_errors = rep(NA, length(shrinkages))
+      min_shrink = 0
+      for (sh in shrinkages) {
+        gbm_mod = gbm(LOAD ~ . - Hour, data = dat_gbm,
+                      distribution = list(name="quantile", alpha = q),
+                      n.trees = max_trees, shrinkage = sh, interaction.depth = 2,
+                      keep.data = FALSE, cv.folds = 4, verbose = F, n.cores = 4)
+        cv_errors[sh==shrinkages] = min(gbm_mod$cv.error)
+        
+        if(cv_errors[sh==shrinkages] < min_cv_error) {
+          min_cv_error = cv_errors[sh==shrinkages]
+          gbm_model = gbm_mod
+          min_shrink = sh
+        }
+      }
+      
+      best.iter <- suppressWarnings(gbm.perf(gbm_model, method="cv", plot.it = F))
+      cat("Shrinkage:", min_shrink, "Iters:", best.iter,"")
+      
+      which_gbm = (which(q==quantiles)-1)*24+h
+      time_elapsed[which_gbm]=as.numeric(proc.time()-ptm)[3]/3600
+      gbms_remain = length(time_elapsed) - which_gbm
+      if (which_gbm >= 5) {
+        slope = lm(y~x, data.frame(y=time_elapsed[(which_gbm-4):which_gbm], x=(which_gbm-4):which_gbm))$coefficients[2]
+        time_remain = gbms_remain * slope
+        cat(round(time_elapsed[which_gbm],1),"hours elapsed. Min",round(time_remain,1),"hours remain.\n")
+      } else {
+        cat("\n")
+      }
+      
+      gbms[[paste(q, h)]] = gbm_model
     }
   }
   
@@ -657,4 +678,5 @@ quantile_loss <- function(pred, actual) {
   
 }
 
-
+# in a separate file because it has my phone number
+source("send_text_function.R")

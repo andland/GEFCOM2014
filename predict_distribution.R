@@ -25,12 +25,11 @@ suppressMessages(library(mgcv))
 cat("\nLoading data and functions\n")
 source("gef2014_functions.R")
 load("weather_pca4.RData")
-load("load_models_gbm5.RData")
-load("load_models_gbm_lag5.RData")
+load(paste0("lag", 0, "_load_models_gbm6.RData")) # for quantiles
 
-set.seed(20140925)
-pred_begin_datetime = ymd(20110201)+hours(1)
-pred_end_datetime = ymd(20110301)
+set.seed(20141001)
+pred_begin_datetime = ymd(20110301)+hours(1)
+pred_end_datetime = ymd(20110401)
 
 cat("\nSimulating weather data\n")
 weather_sims = simulate_weather_pca(pred_begin_datetime = pred_begin_datetime, 
@@ -47,32 +46,34 @@ weather_sims_m = melt(weather_sims, measure.vars = sim_columns,
 cat("\nPredicting quantiles\n")
 pred_sim_quantiles = matrix(NA, nrow(weather_sims_m), length(quantiles),
                             dimnames = list(NULL, quantiles))
-for (h in 0:23) {
-  cat("hour",h,"\n")
-  for (l in 1:3) {
-    if (l == 1) {
-      this_hour = (weather_sims_m$Hour == h & weather_sims_m$DaysBack == 1)
-    } else if (l == 2) {
+
+for (d in 0:7) {
+  cat("lag", d, "\n")
+  if (d > 0) {
+    # already loaded lag 0 gbms
+    load(paste0("lag", d, "_load_models_gbm6.RData"))
+  }
+  
+  for (h in 0:23) {
+    if (d == 0 | d > 7) {
       this_hour = (weather_sims_m$Hour == h & weather_sims_m$DaysBack > 7)
     } else {
-      this_hour = (weather_sims_m$Hour == h & weather_sims_m$DaysBack >= 2 & weather_sims_m$DaysBack <= 7)
+      this_hour = (weather_sims_m$Hour == h & weather_sims_m$DaysBack == d)
     }
+    
     weather_sims_hour = weather_sims_m[this_hour, ]
     for (q in quantiles) {
-      if (l %in% c(1,2)) {
-        gbm_model = gbms[[paste(q, h, l)]]
-      } else {
-        gbm_model = gbm_lags[[paste(q, h)]]
-      }
+      gbm_model = gbms[[paste(q, h)]]
       
       best.iter <- suppressWarnings(gbm.perf(gbm_model,method="cv", plot.it = FALSE))
       pred_sim_quantiles[this_hour, q==quantiles] = 
         predict(gbm_model, weather_sims_hour, n.trees = best.iter)
     }
   }
+  rm(gbms)
+  gc()
 }
 
-rm(gbms)
 
 # delete this!!!
 if (nrows < nrow(weather_sims)) {
@@ -108,5 +109,5 @@ if (parallel > 1) {
 cat("Time:", as.numeric(proc.time() - start_time)[3]/60, "minutes")
 
 pred_distribution = data.frame(DateTime = weather_sims$DateTime, pred_distribution)
-write.csv(pred_distribution, paste0("pred5_", paste(args,collapse = "_"), ".csv"), 
+write.csv(pred_distribution, paste0("pred6_", paste(args,collapse = "_"), ".csv"), 
           row.names=FALSE)

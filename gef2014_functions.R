@@ -45,29 +45,40 @@ add_holidays <- function(dat) {
   dat$IsHoliday <- as.numeric(!is.na(dat$Holiday))
   dat$Holiday[is.na(dat$Holiday)] <- "None"
   dat$IsMajorHoliday = as.numeric(dat$Holiday %in% major_holidays)
+  
+  dat$IsMemorial = as.numeric(dat$Holiday == "Memorial")
+  dat$IsID4 = as.numeric(dat$Holiday == "Independence")
+  dat$IsLabor = as.numeric(dat$Holiday == "Labor")
+  dat$IsThankgiving = as.numeric(dat$Holiday == "Thanksgiving")
+  dat$IsXmas = as.numeric(dat$Holiday == "Christmas")
+  
   dat$Holiday = factor(dat$Holiday)
   
   # detach("package:tis", unload=TRUE)
   return(dat)
 }
 
-add_lags <- function(dat, lag_days = 1) {
+add_lags <- function(dat, lag_days = 1, which_pcs = 1) {
   # creates a lag variable for weather (wPCA1) and LOAD
   # from last hour of yesterday and same hour of yesterday
   if (lag_days <= 0) {
     return(dat)
   }
-  dat_lag_day = subset(dat, , c(DateTime, wPCA1, LOAD))
+  dat_lag_day = subset(dat, , c("DateTime", paste0("wPCA", which_pcs), "LOAD"))
   dat_lag_day$DateTime = dat_lag_day$DateTime + days(lag_days)
-  colnames(dat_lag_day)[2:3] = paste0(colnames(dat_lag_day)[2:3], "_lag_day")
+  colnames(dat_lag_day)[2:ncol(dat_lag_day)] = paste0(colnames(dat_lag_day)[2:ncol(dat_lag_day)], "_lag_day")
   
-  dat_lag_latest = subset(dat, Hour == 0, c(Date, wPCA1, LOAD))
+  dat_lag_latest = subset(dat, Hour == 0, c("Date", paste0("wPCA", which_pcs), "LOAD"))
+  colnames(dat_lag_latest)[2:ncol(dat_lag_day)] = paste0(colnames(dat_lag_latest)[2:ncol(dat_lag_day)], "_lag_latest")
   dat_lag_latest$Date = dat_lag_latest$Date + days(lag_days - 1)
-  colnames(dat_lag_latest)[2:3] = paste0(colnames(dat_lag_latest)[2:3], "_lag_latest")
   
   dat2 = merge(dat, dat_lag_latest, all.x = TRUE)
   dat2 = merge(dat2, dat_lag_day, all.x = TRUE)
-  dat2$wPCA1_lag_latest = ifelse(dat2$Hour == 0, dat2$wPCA1_lag_day, dat2$wPCA1_lag_latest)
+  for (pc in which_pcs) {
+    which_latest = which(colnames(dat2)==paste0("wPCA", pc, "_lag_latest"))
+    which_day = which(colnames(dat2)==paste0("wPCA", pc, "_lag_day"))
+    dat2[, which_latest] = ifelse(dat2$Hour == 0, dat2[, which_day], dat2[, which_latest])
+  }
   dat2$LOAD_lag_latest = ifelse(dat2$Hour == 0, dat2$LOAD_lag_day, dat2$LOAD_lag_latest)
   
   dat2 <- dat2[order(dat2$DateTime), ]
@@ -159,16 +170,17 @@ train_pca_normals <- function(begin_datetime, end_datetime, weather_pca, which_p
   dat_train$wPCA = predict(weather_pca, dat_train)[, which_pc]
   
   y_train = dat_train$wPCA
-  form = as.formula("wPCA ~ s(DOY, bs = 'cc') + s(Hour, bs = 'cc')")
   
   weights = rep(1, nrow(dat_train))
   fitted_old = rep(mean(y_train), nrow(dat_train))
   for (i in 1:5) {
-    gam_mean_model = gam(form, data = dat_train, weights = weights)
+    gam_mean_model = gam(wPCA ~ s(DOY, bs = 'cc') + HourFactor * MonthFactor,
+                         data = dat_train, weights = weights)
     dat_train$Fitted = fitted.values(gam_mean_model)
     dat_train$Residuals = y_train - dat_train$Fitted
     
-    gam_var_model = gam(log(Residuals^2) ~ s(DOY, bs = "cc") + s(Hour, bs = "cc"), data = dat_train)
+    gam_var_model = gam(log(Residuals^2) ~ s(DOY, bs = 'cc') + HourFactor * MonthFactor,
+                        data = dat_train)
     weights_old = weights
     fitted_var = exp(fitted(gam_var_model))
     weights = fitted_var^-1
@@ -222,8 +234,8 @@ predict_normal_pca <- function(begin_datetime, end_datetime, normal_models, whic
   
   dat$wPCA_mean = as.numeric(predict(normal_models[[1]], dat))
   dat$wPCA_sd = as.numeric(sqrt(exp(predict(normal_models[[2]], dat))))
-  colnames(dat)[colnames(dat)=="wPCA_mean"] <- paste0("wPCA", which_pc, "_mean")
-  colnames(dat)[colnames(dat)=="wPCA_sd"] <- paste0("wPCA", which_pc, "_sd")
+  # colnames(dat)[colnames(dat)=="wPCA_mean"] <- paste0("wPCA", which_pc, "_mean")
+  # colnames(dat)[colnames(dat)=="wPCA_sd"] <- paste0("wPCA", which_pc, "_sd")
   
   return(dat)
 }
@@ -234,75 +246,83 @@ predict_normal_pca <- function(begin_datetime, end_datetime, normal_models, whic
 
 simulate_weather_pca <- function(begin_datetime, end_datetime, 
                                  pred_begin_datetime, pred_end_datetime, 
-                                 weather_pca, num_sims) {
+                                 weather_pca, num_sims, which_pc = 1) {
   # a temperature must exist for pred_begin_datetime - 1 hour
+  # Assumes independence between the PCs
+  # setwd("D:/Kaggle/GEFCOM2014/")
+  # load("weather_pca4.RData")
+  # begin_datetime = ymd(20090101)
+  # end_datetime = ymd(20110301)
+  # pred_begin_datetime = ymd(20110301)+hours(1)
+  # pred_end_datetime = ymd(20110401)
+  # num_sims = 10; which_pc = 2
+  
   library(mgcv)
+  dat_start = open_data(pred_begin_datetime - hours(24), pred_begin_datetime - hours(1))
+  if (nrow(dat_start) < 24) {
+    stop("The prediction begin date is too far into the future!")
+  }
   dat_train = open_data(begin_datetime, end_datetime)
   
-  dat_train$wPCA1 = predict(weather_pca, dat_train)[, 1]
-  dat_train$wPCA2 = predict(weather_pca, dat_train)[, 2]
+  dat_train$wPCA = predict(weather_pca, dat_train)[, which_pc]
   
-  normal_pca_models1 = train_pca_normals(begin_datetime, end_datetime, weather_pca = weather_pca, which_pc = 1)
-  normal_pca_models2 = train_pca_normals(begin_datetime, end_datetime, weather_pca = weather_pca, which_pc = 2)
-  fitted_normal_pca1 = predict_normal_pca(min(dat_train$DateTime), max(dat_train$DateTime), normal_pca_models1, which_pc = 1)
-  fitted_normal_pca2 = predict_normal_pca(min(dat_train$DateTime), max(dat_train$DateTime), normal_pca_models2, which_pc = 2)
+  normal_pca_models = train_pca_normals(begin_datetime, end_datetime, weather_pca = weather_pca, which_pc = which_pc)
+  fitted_normal_pca = predict_normal_pca(min(dat_train$DateTime), max(dat_train$DateTime), normal_pca_models, which_pc = which_pc)
   
   rows = nrow(dat_train)
-  dat_train = merge(dat_train, subset(fitted_normal_pca1, , c(DateTime, wPCA1_mean, wPCA1_sd)))
-  dat_train = merge(dat_train, subset(fitted_normal_pca2, , c(DateTime, wPCA2_mean, wPCA2_sd)))
+  dat_train = merge(dat_train, subset(fitted_normal_pca, , c(DateTime, wPCA_mean, wPCA_sd)))
   if (nrow(dat_train)!=rows) {
     stop("Unsuccessful merge")
   }
   
-  dat_train$Resid = with(dat_train, (wPCA1 - wPCA1_mean) / wPCA1_sd)
+  dat_train$Resid = with(dat_train, (wPCA - wPCA_mean) / wPCA_sd)
   dat_train$Resid_Diff = c(NA, diff(dat_train$Resid))
-  dat_train$Resid2 = with(dat_train, (wPCA2 - wPCA2_mean) / wPCA2_sd)
-  dat_train$Resid2_Diff = c(NA, diff(dat_train$Resid2))
   
-  dat_start = open_data(pred_begin_datetime - hours(24), pred_begin_datetime - hours(1))
-  dat_start$wPCA1 = predict(weather_pca, dat_start)[,1]
-  pred_normal_pca_start = predict_normal_pca(pred_begin_datetime - hours(24), pred_begin_datetime - hours(1), normal_pca_models1, which_pc = 1)
-  wPCA1_resids = (dat_start$wPCA1 - pred_normal_pca_start$wPCA1_mean) / pred_normal_pca_start$wPCA1_sd
-  wPCA1_resid_start = wPCA1_resids[length(wPCA1_resids)]
-  wPCA1_diff_start = wPCA1_resids[length(wPCA1_resids)] - wPCA1_resids[length(wPCA1_resids) - 1]
+  dat_start$wPCA = predict(weather_pca, dat_start)[, which_pc]
+  pred_normal_pca_start = predict_normal_pca(pred_begin_datetime - hours(24), pred_begin_datetime - hours(1), normal_pca_models, which_pc = which_pc)
+  wPCA_resids = (dat_start$wPCA - pred_normal_pca_start$wPCA_mean) / pred_normal_pca_start$wPCA_sd
+  wPCA_resid_start = wPCA_resids[length(wPCA_resids)]
+  wPCA_diff_start = wPCA_resids[length(wPCA_resids)] - wPCA_resids[length(wPCA_resids) - 1]
   
-  
-  pred_normal_pca = predict_normal_pca(pred_begin_datetime, pred_end_datetime, normal_pca_models1, which_pc = 1)
+  pred_normal_pca = predict_normal_pca(pred_begin_datetime, pred_end_datetime, normal_pca_models, which_pc = which_pc)
   num_hours = nrow(pred_normal_pca)
   
   # append actuals from the previous day to the prediction data set
   # in order to get lags
-  pred_normal_pca$LOAD = NA
-  pred_normal_pca$wPCA1 = NA
-  dat_start$wPCA1_mean = NA
-  dat_start$wPCA1_sd = NA
-  pred_normal_pca = rbind(subset(dat_start, , colnames(pred_normal_pca)),
-             pred_normal_pca)
-  temp_pred_normal_pca = pred_normal_pca
-  
-  pred_normal_pca$DaysBack = NA
-  pred_normal_pca$wPCA1_lag_day = NA
-  pred_normal_pca$LOAD_lag_day = NA
-  pred_normal_pca$wPCA1_lag_latest = NA
-  pred_normal_pca$LOAD_lag_latest = NA
-  for (d in 1:7) {
-    temp_df = add_lags(temp_pred_normal_pca, d)
-    rows = which(!is.na(temp_df$wPCA1_lag_day))
-    pred_normal_pca$wPCA1_lag_day[rows] = temp_df$wPCA1_lag_day[rows]
-    pred_normal_pca$LOAD_lag_day[rows] = temp_df$LOAD_lag_day[rows]
-    pred_normal_pca$wPCA1_lag_latest[rows] = temp_df$wPCA1_lag_latest[rows]
-    pred_normal_pca$LOAD_lag_latest[rows] = temp_df$LOAD_lag_latest[rows]
-    pred_normal_pca$DaysBack[rows] = d
-  }
-  pred_normal_pca$DaysBack[is.na(pred_normal_pca$DaysBack)] = 33
-  pred_normal_pca$DaysBackFactor = factor(pred_normal_pca$DaysBack, levels = 1:7)
-  
-  # return the data back to normal
-  pred_normal_pca = subset(pred_normal_pca, DateTime >= pred_begin_datetime)
-  pred_normal_pca$LOAD = NULL
-  pred_normal_pca$wPCA1 = NULL
-  if (num_hours != nrow(pred_normal_pca)) {
-    stop("Adding lags messed up weather prediction data")
+  if (which_pc == 1) {
+    dat_start$wPCA1 = dat_start$wPCA
+    pred_normal_pca$LOAD = NA
+    pred_normal_pca$wPCA1 = NA
+    dat_start$wPCA_mean = NA
+    dat_start$wPCA_sd = NA
+    pred_normal_pca = rbind(subset(dat_start, , colnames(pred_normal_pca)),
+               pred_normal_pca)
+    temp_pred_normal_pca = pred_normal_pca
+    
+    pred_normal_pca$DaysBack = NA
+    pred_normal_pca$LOAD_lag_day = NA
+    pred_normal_pca$LOAD_lag_latest = NA
+    pred_normal_pca$wPCA1_lag_day = NA
+    pred_normal_pca$wPCA1_lag_latest = NA
+    for (d in 1:2) {
+      temp_df = add_lags(temp_pred_normal_pca, d, which_pc)
+      rows = which(!is.na(temp_df$wPCA1_lag_day))
+      pred_normal_pca$wPCA1_lag_day[rows] = temp_df$wPCA1_lag_day[rows]
+      pred_normal_pca$LOAD_lag_day[rows] = temp_df$LOAD_lag_day[rows]
+      pred_normal_pca$wPCA1_lag_latest[rows] = temp_df$wPCA1_lag_latest[rows]
+      pred_normal_pca$LOAD_lag_latest[rows] = temp_df$LOAD_lag_latest[rows]
+      pred_normal_pca$DaysBack[rows] = d
+    }
+    pred_normal_pca$DaysBack[is.na(pred_normal_pca$DaysBack)] = 33
+    # pred_normal_pca$DaysBackFactor = factor(pred_normal_pca$DaysBack, levels = 1:2)
+    
+    # return the data back to normal
+    pred_normal_pca = subset(pred_normal_pca, DateTime >= pred_begin_datetime)
+    pred_normal_pca$LOAD = NULL
+    pred_normal_pca$wPCA1 = NULL
+    if (num_hours != nrow(pred_normal_pca)) {
+      stop("Adding lags messed up weather prediction data")
+    }
   }
   
   # eligable_months = month(pred_begin_datetime) + -1:1
@@ -316,7 +336,7 @@ simulate_weather_pca <- function(begin_datetime, end_datetime,
   starting_points = which(dat_train$Hour == hour(pred_begin_datetime) & 
                           !is.na(dat_train$Resid_Diff))
   starting_points = starting_points[starting_points < (nrow(dat_train) - num_hours - 1)]
-  starting_points = order(abs(dat_train$Resid_Diff[starting_points-1] - wPCA1_diff_start))[1:num_sims] + 1
+  starting_points = order(abs(dat_train$Resid_Diff[starting_points-1] - wPCA_diff_start))[1:num_sims] + 1
   
   
   pca_sims = matrix(NA, num_hours, num_sims, dimnames = list(NULL, paste0("Sim", 1:num_sims)))
@@ -324,8 +344,8 @@ simulate_weather_pca <- function(begin_datetime, end_datetime,
   for (i in 1:num_sims) {
     bs_start = bs_starts[i]
     sim_diffs = dat_train$Resid_Diff[bs_start:(bs_start + num_hours - 1)]
-    sim_resids = wPCA1_resid_start + cumsum(sim_diffs)
-    pca_sims[,i] = sim_resids * pred_normal_pca$wPCA1_sd + pred_normal_pca$wPCA1_mean
+    sim_resids = wPCA_resid_start + cumsum(sim_diffs)
+    pca_sims[,i] = sim_resids * pred_normal_pca$wPCA_sd + pred_normal_pca$wPCA_mean
   }
   
   return(cbind(pred_normal_pca, pca_sims))
@@ -339,7 +359,8 @@ train_load_models_gbm <- function(begin_datetime, end_datetime, quantiles, weath
   
   cat("load data\n")
   dat_train = open_data(begin_datetime, end_datetime)
-  dat_train$wPCA1 = predict(weather_pca, dat_train)[,1]
+  dat_train$wPCA1 = predict(weather_pca, dat_train)[, 1]
+  dat_train$wPCA2 = predict(weather_pca, dat_train)[, 2]
   dat_train <- add_lags(dat_train, lag_days)
   dat_train <- add_holidays(dat_train)
   
@@ -348,7 +369,7 @@ train_load_models_gbm <- function(begin_datetime, end_datetime, quantiles, weath
     dat_train = subset(dat_train, !is.na(LOAD_lag_day) & !is.na(LOAD_lag_latest))
   }
   
-  standard_columns = c("LOAD", "wPCA1", "Hour", "MonthFactor", "DOW", "DOY", "Trend", "IsHoliday")
+  standard_columns = c("LOAD", "wPCA1", "wPCA2", "Hour", "MonthFactor", "DOW", "DOY", "Trend", "IsMemorial")
   lag_day_columns = c("wPCA1_lag_day", "LOAD_lag_day")
   lag_latest_columns = c("wPCA1_lag_latest", "LOAD_lag_latest")
   

@@ -369,7 +369,7 @@ train_load_models_gbm <- function(begin_datetime, end_datetime, quantiles, weath
     dat_train = subset(dat_train, !is.na(LOAD_lag_day) & !is.na(LOAD_lag_latest))
   }
   
-  standard_columns = c("LOAD", "wPCA1", "wPCA2", "Hour", "MonthFactor", "DOW", "DOY", "Trend", "IsMemorial")
+  standard_columns = c("LOAD", "wPCA1", "Hour", "MonthFactor", "DOW", "DOY", "Trend")
   lag_day_columns = c("wPCA1_lag_day", "LOAD_lag_day")
   lag_latest_columns = c("wPCA1_lag_latest", "LOAD_lag_latest")
   
@@ -697,6 +697,173 @@ quantile_loss <- function(pred, actual) {
   }
   loss / prod(dim(pred))
   
+}
+
+quantile_gradient <- function(pred, actual) {
+  if ((nrow(pred) != length(actual)) | ncol(pred) != 99) {
+    stop("dimensions are not correct")
+  }
+  
+  gradient = matrix(NA, nrow(pred), 99)
+  for (q in 1:99) {
+    gradient[, q] = ifelse(actual < pred[, q], -(1-q/100), q/100)
+  }
+  
+  gradient
+}
+
+# function for learning the CDF ####
+
+gbm_cdf_train <- function(formula, X, df, max_trees = 100, shrinkage = 0.1, bag_fraction = 0.5) {
+  # df should be the number
+  library(splines)
+  library(gtools)
+  library(rpart)
+  library(mgcv)
+  # library(quadprog) # was failing on some projections
+  library(kernlab)
+  
+  quants = quantile(X$LOAD, probs = (1:99)/100, na.rm = TRUE)
+  identity = diag(rep(1, df))
+  
+  #   knots = logit(knots)
+  #   basis = ns(logit(1:99/100), knots=knots, Boundary.knots = logit(c(0.01, 0.99)), intercept = TRUE)
+  #   df = ncol(basis)
+  #   reg=lm(quants~basis-1)
+  #   quantiles = (1:99)/100
+  #   design_matrix = predict(basis, logit(quantiles))
+  #   # plot(1:99/100, quants)
+  #   # lines(quantiles, design_matrix %*% coef(reg), col = 2)
+  
+  percentiles = logit(1:99/100)
+  dat = data.frame(percentiles, quants)
+  sm <- smoothCon(s(percentiles, k=df, bs="cr"), dat, knots=NULL)[[1]]
+  design_matrix = sm$X
+  constraints <-mono.con(sm$xp);
+  reg = lm(quants ~ design_matrix - 1)
+  
+  alpha_initial = as.numeric(coef(reg))
+  
+  # qp = solve.QP(identity, alpha_initial, t(constraints$A), constraints$b)
+  # alpha_initial = qp$solution
+  print(alpha_initial)
+  ip = ipop(c = matrix(-alpha_initial), H = identity, A = constraints$A, b = matrix(constraints$b), 
+            l = matrix(rep(-1e9, length(alpha_initial))), u = matrix(rep(1e9, length(alpha_initial))), r = matrix(rep(1e9, length(constraints$b))))
+  alpha_initial = ip@primal
+  print(ip@primal)
+  
+  if (min(as.numeric(constraints$A %*% alpha_initial) - constraints$b) < -1e-10) {
+    stop("did not initialize non-decreasing function")
+  }
+  
+  alphas = matrix(alpha_initial, nrow(X), df, byrow = TRUE)
+  loss_trace = numeric(max_trees + 1)
+  trees = list()
+  for (t in 1:max_trees) {
+    fitted = alphas %*% t(design_matrix)
+    loss_trace[t] = quantile_loss(fitted, X$LOAD)
+    grad_alpha = quantile_gradient(fitted, X$LOAD) %*% design_matrix
+    
+    cat("Fitted Tree:", t, "Loss:", loss_trace[t], "")
+    
+    sub_sample = sample(nrow(X), nrow(X) * bag_fraction)
+    X_bag = X[sub_sample, ]
+    for (k in 1:df) {
+      X_bag$Gradient = grad_alpha[sub_sample, k]
+      tree = rpart(formula,
+                   data = X_bag, control = rpart.control(maxdepth = 2, minbucket = 10, cp = 0, maxcompete = 0, xval=0))
+      # rpart.plot::prp(tree, type = 3) # Thanks Zhou!
+      tree$where = NULL; tree$y = NULL # reduce size
+      trees[[paste(t, k)]] = tree
+      alphas[, k] = alphas[, k] + shrinkage * predict(tree, X)
+    }
+    
+    conditions = sweep(constraints$A %*% t(alphas), 1, constraints$b, "-")
+    non_mon = which(apply(conditions, 2, min) < -1e-10)
+    cat(length(non_mon), "alphas non-mon")
+    if (length(non_mon) > 0) {
+      for (i in non_mon) {
+        # cat(i,"\n")
+        # qp = solve.QP(identity, alphas[i, ], t(constraints$A), constraints$b)
+        # alphas[i, ] = qp$solution
+        ip = ipop(c = matrix(-alphas[i, ]), H = identity, A = constraints$A, b = matrix(constraints$b), 
+                  l = matrix(rep(-1e9, length(alpha_initial))), u = matrix(rep(1e9, length(alpha_initial))), r = matrix(rep(1e9, length(constraints$b))))
+        alphas[i, ] = ip@primal
+      }
+    }
+    cat(".\n")
+  }
+  fitted = alphas %*% t(design_matrix)
+  loss_trace[t + 1] = quantile_loss(fitted, X$LOAD)
+  
+  result = list(trees = trees,
+                alpha_initial = alpha_initial,
+                # alphas = alphas,
+                shrinkage = shrinkage,
+                design_matrix = design_matrix,
+                loss_trace = loss_trace, 
+                constraints = constraints)
+  class(result) = "gbm_cdf"
+  return(result)
+}
+
+
+predict.gbm_cdf <- function(object, new_X, new_y, num_trees) {
+  library(splines)
+  library(rpart)
+  # library(quadprog)
+  library(kernlab)
+  
+  df = length(object$alpha_initial)
+  identity = diag(rep(1, df))
+  
+  if (missing(num_trees)) {
+    num_trees = length(object$trees) / df
+    cat("num_trees not specified. Using all ", num_trees, " of them.\n")
+  }
+  
+  alphas = matrix(object$alpha_initial, nrow(new_X), df, byrow = TRUE)
+  loss_trace = rep(NA, num_trees + 1)
+  for (t in 1:num_trees) {
+    fitted = alphas %*% t(object$design_matrix)
+    if (!missing(new_y)) {
+      loss_trace[t] = quantile_loss(fitted, new_y)
+    }
+    
+    cat("Prediction Tree:", t, "Loss:", loss_trace[t], "")
+    
+    for (k in 1:df) {
+      alphas[, k] = alphas[, k] + object$shrinkage * predict(object$trees[[paste(t, k)]], new_X)
+    }
+    
+    conditions = sweep(object$constraints$A %*% t(alphas), 1, object$constraints$b, "-")
+    non_mon = which(apply(conditions, 2, min) < -1e-10)
+    cat(length(non_mon), "alphas non-mon\n")
+    if (length(non_mon) > 0) {
+      for (i in non_mon) {
+        # qp = solve.QP(identity, alphas[i, ], t(object$constraints$A), object$constraints$b)
+        # alphas[i, ] = qp$solution
+        ip = ipop(c = matrix(-alphas[i, ]), H = identity, A = object$constraints$A, b = matrix(object$constraints$b), 
+                  l = matrix(rep(-1e9, length(object$alpha_initial))), u = matrix(rep(1e9, length(object$alpha_initial))), r = matrix(rep(1e9, length(object$constraints$b))))
+        alphas[i, ] = ip@primal
+      }
+    }
+  }
+  fitted = alphas %*% t(object$design_matrix)
+  if (!missing(new_y)) {
+    loss_trace[t+1] = quantile_loss(fitted, new_y)
+  }
+  if (!missing(new_y)) {
+    best_tree = which.min(loss_trace) - 1
+    cat("Lowest loss was at tree", best_tree, "\n")
+  } else {
+    best_tree = NULL
+  }
+  
+  return(list(pred = fitted,
+              alphas = alphas,
+              best_tree = best_tree,
+              loss_trace = loss_trace))
 }
 
 # in a separate file because it has my phone number

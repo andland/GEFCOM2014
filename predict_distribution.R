@@ -25,32 +25,33 @@ suppressMessages(library(mgcv))
 cat("\nLoading data and functions\n")
 source("gef2014_functions.R")
 load("weather_pca4.RData")
-load(paste0("lag", 0, "_load_models_gbm7.RData")) # for quantiles
+load(paste0("lag", 0, "_load_models_gbm8.RData")) # for quantiles
 
-set.seed(20141008)
-pred_begin_datetime = ymd(20110401)+hours(1)
-pred_end_datetime = ymd(20110501)
+set.seed(20141015)
+pred_begin_datetime = ymd(20110501)+hours(1)
+pred_end_datetime = ymd(20110601)
 
 cat("\nSimulating weather data\n")
 weather_sims1 = simulate_weather_pca(pred_begin_datetime = pred_begin_datetime, 
                                      pred_end_datetime = pred_end_datetime,
                                      weather_pca = weather_pca, 
                                      num_sims = num_sims, which_pc = 1)
-weather_sims2 = simulate_weather_pca(pred_begin_datetime = pred_begin_datetime, 
-                                     pred_end_datetime = pred_end_datetime,
-                                     weather_pca = weather_pca, 
-                                     num_sims = num_sims, which_pc = 2)
+# weather_sims2 = simulate_weather_pca(pred_begin_datetime = pred_begin_datetime, 
+#                                      pred_end_datetime = pred_end_datetime,
+#                                      weather_pca = weather_pca, 
+#                                      num_sims = num_sims, which_pc = 2)
 weather_sims1 <- add_holidays(weather_sims1)
 
 sim_columns = grep("Sim", colnames(weather_sims1))
 weather_sims_m1 = melt(weather_sims1, measure.vars = sim_columns,
                       value.name = "wPCA1")
-sim_columns = grep("Sim", colnames(weather_sims2))
-weather_sims_m2 = melt(weather_sims2, measure.vars = sim_columns,
-                       value.name = "wPCA2")
+# sim_columns = grep("Sim", colnames(weather_sims2))
+# weather_sims_m2 = melt(weather_sims2, measure.vars = sim_columns,
+#                        value.name = "wPCA2")
 
-weather_sims_m = merge(weather_sims_m1, subset(weather_sims_m2, , c(DateTime, variable, wPCA2)))
-rm(weather_sims_m1, weather_sims_m2, weather_sims2)
+# weather_sims_m = merge(weather_sims_m1, subset(weather_sims_m2, , c(DateTime, variable, wPCA2)))
+weather_sims_m = weather_sims_m1
+# rm(weather_sims_m1, weather_sims_m2, weather_sims2)
 
 cat("\nPredicting quantiles\n")
 pred_sim_quantiles = matrix(NA, nrow(weather_sims_m), length(quantiles),
@@ -60,7 +61,7 @@ for (d in 0:2) {
   cat("lag", d, "\n")
   if (d > 0) {
     # already loaded lag 0 gbms
-    load(paste0("lag", d, "_load_models_gbm7.RData"))
+    load(paste0("lag", d, "_load_models_gbm8.RData"))
   }
   
   for (h in 0:23) {
@@ -118,5 +119,5 @@ if (parallel > 1) {
 cat("Time:", as.numeric(proc.time() - start_time)[3]/60, "minutes")
 
 pred_distribution = data.frame(DateTime = weather_sims1$DateTime, pred_distribution)
-write.csv(pred_distribution, paste0("pred7_", paste(args,collapse = "_"), ".csv"), 
+write.csv(pred_distribution, paste0("pred8_", paste(args,collapse = "_"), ".csv"), 
           row.names=FALSE)

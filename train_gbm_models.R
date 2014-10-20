@@ -17,12 +17,11 @@ quantiles = c(quantiles, 0.5, 1-quantiles)
 quantiles = sort(quantiles)
 
 gbms = train_load_models_gbm(quantiles = quantiles, weather_pca = weather_pca,
-                             max_trees = 1000, shrinkages = c(0.075,0.3), lag_days = lag)
-# used only 750 max trees for task 7
+                             max_trees = 1250, shrinkages = c(0.075, 0.3), lag_days = lag)
 
 # assign(paste0("gbms", lag), gbms)
 
 save(list = c(paste0("gbms"), "quantiles"), 
-     file = paste0("lag", lag, "_load_models_gbm7.RData"))
+     file = paste0("lag", lag, "_load_models_gbm8.RData"))
 
 send.text(paste("Lag", lag, "GBMs done training"))

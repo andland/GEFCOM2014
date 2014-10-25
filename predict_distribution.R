@@ -25,11 +25,11 @@ suppressMessages(library(mgcv))
 cat("\nLoading data and functions\n")
 source("gef2014_functions.R")
 load("weather_pca4.RData")
-load(paste0("lag", 0, "_load_models_gbm8.RData")) # for quantiles
+load(paste0("lag", 0, "_load_models_gbm9.RData")) # for quantiles
 
-set.seed(20141015)
-pred_begin_datetime = ymd(20110501)+hours(1)
-pred_end_datetime = ymd(20110601)
+set.seed(20141022)
+pred_begin_datetime = ymd(20110601)+hours(1)
+pred_end_datetime = ymd(20110701)
 
 cat("\nSimulating weather data\n")
 weather_sims1 = simulate_weather_pca(pred_begin_datetime = pred_begin_datetime, 
@@ -61,7 +61,7 @@ for (d in 0:2) {
   cat("lag", d, "\n")
   if (d > 0) {
     # already loaded lag 0 gbms
-    load(paste0("lag", d, "_load_models_gbm8.RData"))
+    load(paste0("lag", d, "_load_models_gbm9.RData"))
   }
   
   for (h in 0:23) {
@@ -119,5 +119,5 @@ if (parallel > 1) {
 cat("Time:", as.numeric(proc.time() - start_time)[3]/60, "minutes")
 
 pred_distribution = data.frame(DateTime = weather_sims1$DateTime, pred_distribution)
-write.csv(pred_distribution, paste0("pred8_", paste(args,collapse = "_"), ".csv"), 
+write.csv(pred_distribution, paste0("pred9_", paste(args,collapse = "_"), ".csv"), 
           row.names=FALSE)

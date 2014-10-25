@@ -712,9 +712,10 @@ quantile_gradient <- function(pred, actual) {
   gradient
 }
 
-# function for learning the CDF ####
+# functions for learning the CDF ####
 
-gbm_cdf_train <- function(formula, X, df, max_trees = 100, shrinkage = 0.1, bag_fraction = 0.5) {
+gbm_cdf_train <- function(formula, X, df, max_trees = 100, shrinkage = 0.1, 
+                          bag_fraction = 0.5, quiet = TRUE) {
   # df should be the number
   library(splines)
   library(gtools)
@@ -746,25 +747,25 @@ gbm_cdf_train <- function(formula, X, df, max_trees = 100, shrinkage = 0.1, bag_
   
   # qp = solve.QP(identity, alpha_initial, t(constraints$A), constraints$b)
   # alpha_initial = qp$solution
-  print(alpha_initial)
   ip = ipop(c = matrix(-alpha_initial), H = identity, A = constraints$A, b = matrix(constraints$b), 
             l = matrix(rep(-1e9, length(alpha_initial))), u = matrix(rep(1e9, length(alpha_initial))), r = matrix(rep(1e9, length(constraints$b))))
   alpha_initial = ip@primal
-  print(ip@primal)
   
   if (min(as.numeric(constraints$A %*% alpha_initial) - constraints$b) < -1e-10) {
     stop("did not initialize non-decreasing function")
   }
   
   alphas = matrix(alpha_initial, nrow(X), df, byrow = TRUE)
+  fitted = alphas %*% t(design_matrix)
   loss_trace = numeric(max_trees + 1)
   trees = list()
   for (t in 1:max_trees) {
-    fitted = alphas %*% t(design_matrix)
     loss_trace[t] = quantile_loss(fitted, X$LOAD)
     grad_alpha = quantile_gradient(fitted, X$LOAD) %*% design_matrix
     
-    cat("Fitted Tree:", t, "Loss:", loss_trace[t], "")
+    if (!quiet) {
+      cat("Fitted Tree:", t, "Loss:", loss_trace[t], "")
+    }
     
     sub_sample = sample(nrow(X), nrow(X) * bag_fraction)
     X_bag = X[sub_sample, ]
@@ -778,9 +779,21 @@ gbm_cdf_train <- function(formula, X, df, max_trees = 100, shrinkage = 0.1, bag_
       alphas[, k] = alphas[, k] + shrinkage * predict(tree, X)
     }
     
-    conditions = sweep(constraints$A %*% t(alphas), 1, constraints$b, "-")
-    non_mon = which(apply(conditions, 2, min) < -1e-10)
-    cat(length(non_mon), "alphas non-mon")
+    if (FALSE) {
+      # check the linear inequaly conditions of the coefficients
+      conditions = sweep(constraints$A %*% t(alphas), 1, constraints$b, "-")
+      non_mon = which(apply(conditions, 2, min) < -1e-10)
+    } else {
+      # instead check directly for monotonicity
+      # this is less strict and should have fewer cases
+      # but I am not optimizing with the correct conditions
+      fitted = alphas %*% t(design_matrix)
+      non_mon = which(apply(t(apply(fitted, 1, diff))<0, 1, any))
+    }
+    
+    if (!quiet) {
+      cat(length(non_mon), "alphas non-mon")
+    }
     if (length(non_mon) > 0) {
       for (i in non_mon) {
         # cat(i,"\n")
@@ -791,9 +804,10 @@ gbm_cdf_train <- function(formula, X, df, max_trees = 100, shrinkage = 0.1, bag_
         alphas[i, ] = ip@primal
       }
     }
-    cat(".\n")
+    if (!quiet) {
+      cat(".\n")
+    }
   }
-  fitted = alphas %*% t(design_matrix)
   loss_trace[t + 1] = quantile_loss(fitted, X$LOAD)
   
   result = list(trees = trees,
@@ -808,7 +822,7 @@ gbm_cdf_train <- function(formula, X, df, max_trees = 100, shrinkage = 0.1, bag_
 }
 
 
-predict.gbm_cdf <- function(object, new_X, new_y, num_trees) {
+predict.gbm_cdf <- function(object, new_X, new_y, num_trees, quiet = TRUE) {
   library(splines)
   library(rpart)
   # library(quadprog)
@@ -819,7 +833,9 @@ predict.gbm_cdf <- function(object, new_X, new_y, num_trees) {
   
   if (missing(num_trees)) {
     num_trees = length(object$trees) / df
-    cat("num_trees not specified. Using all ", num_trees, " of them.\n")
+    if (!quiet) {
+      cat("num_trees not specified. Using all ", num_trees, " of them.\n")
+    }
   }
   
   alphas = matrix(object$alpha_initial, nrow(new_X), df, byrow = TRUE)
@@ -830,7 +846,9 @@ predict.gbm_cdf <- function(object, new_X, new_y, num_trees) {
       loss_trace[t] = quantile_loss(fitted, new_y)
     }
     
-    cat("Prediction Tree:", t, "Loss:", loss_trace[t], "")
+    if (!quiet) {
+      cat("Prediction Tree:", t, "Loss:", loss_trace[t], "")
+    }
     
     for (k in 1:df) {
       alphas[, k] = alphas[, k] + object$shrinkage * predict(object$trees[[paste(t, k)]], new_X)
@@ -838,7 +856,9 @@ predict.gbm_cdf <- function(object, new_X, new_y, num_trees) {
     
     conditions = sweep(object$constraints$A %*% t(alphas), 1, object$constraints$b, "-")
     non_mon = which(apply(conditions, 2, min) < -1e-10)
-    cat(length(non_mon), "alphas non-mon\n")
+    if (!quiet) {
+      cat(length(non_mon), "alphas non-mon\n")
+    }
     if (length(non_mon) > 0) {
       for (i in non_mon) {
         # qp = solve.QP(identity, alphas[i, ], t(object$constraints$A), object$constraints$b)
@@ -863,6 +883,56 @@ predict.gbm_cdf <- function(object, new_X, new_y, num_trees) {
   return(list(pred = fitted,
               alphas = alphas,
               best_tree = best_tree,
+              loss_trace = loss_trace))
+}
+
+gbm_cdf_cv <- function(formula, X, df, max_trees = 100, shrinkage = 0.1, 
+                       bag_fraction = 0.5, folds = 5, parallel = 1, quiet = TRUE) {
+  library(dplyr)
+  library(splines)
+  library(gtools)
+  library(rpart)
+  library(mgcv)
+  library(kernlab)
+  
+  if (parallel > 1) {
+    suppressMessages(library(doMC))
+    registerDoMC(parallel)
+  }
+  
+  if (length(folds) == 1) {
+    cvs = sample(folds, nrow(X), TRUE)
+  } else if (length(folds) == nrow(X)) {
+    cvs = folds
+  }
+  
+  valid_sub = sort(sample(nrow(dat_train), 250))
+  dat_valid = dat_train[valid_sub,]
+  dat_train = dat_train[-valid_sub, ]
+  
+  loss_trace_folds <- foreach(i=1:folds, .combine=rbind) %dopar% {
+    if (!quiet) {
+      cat("Fold", i, "\n")
+    }
+    dat_valid = X[cvs == i, ]
+    dat_train = X[cvs != i, ]
+    
+    model = gbm_cdf_train(formula, dat_train, df, max_trees, shrinkage, bag_fraction, TRUE)
+    preds = predict.gbm_cdf(model, dat_valid, dat_valid$LOAD, max_trees, TRUE)
+    
+    data.frame(Trees = 1:max_trees, 
+               Loss = preds$loss_trace[-1], 
+               Weight = nrow(dat_valid))
+  }
+  
+  # combine the different folds
+  loss_trace <- tbl_df(loss_trace_folds) %>%
+    mutate(LossWeight = Loss * Weight) %>%
+    group_by(Trees) %>%
+    summarise(Loss = sum(LossWeight) / sum(Weight)) %>%
+    arrange(Trees)
+  
+  return(list(best_tree = which.min(loss_trace$Loss),
               loss_trace = loss_trace))
 }
 

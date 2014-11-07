@@ -778,6 +778,7 @@ gbm_cdf_train <- function(formula, X, df, max_trees = 100, shrinkage = 0.1,
       trees[[paste(t, k)]] = tree
       alphas[, k] = alphas[, k] + shrinkage * predict(tree, X)
     }
+    fitted = alphas %*% t(design_matrix)
     
     if (FALSE) {
       # check the linear inequaly conditions of the coefficients
@@ -787,7 +788,6 @@ gbm_cdf_train <- function(formula, X, df, max_trees = 100, shrinkage = 0.1,
       # instead check directly for monotonicity
       # this is less strict and should have fewer cases
       # but I am not optimizing with the correct conditions
-      fitted = alphas %*% t(design_matrix)
       non_mon = which(apply(t(apply(fitted, 1, diff))<0, 1, any))
     }
     
@@ -821,7 +821,6 @@ gbm_cdf_train <- function(formula, X, df, max_trees = 100, shrinkage = 0.1,
   return(result)
 }
 
-
 predict.gbm_cdf <- function(object, new_X, new_y, num_trees, quiet = TRUE) {
   library(splines)
   library(rpart)
@@ -840,8 +839,8 @@ predict.gbm_cdf <- function(object, new_X, new_y, num_trees, quiet = TRUE) {
   
   alphas = matrix(object$alpha_initial, nrow(new_X), df, byrow = TRUE)
   loss_trace = rep(NA, num_trees + 1)
+  fitted = alphas %*% t(object$design_matrix)
   for (t in 1:num_trees) {
-    fitted = alphas %*% t(object$design_matrix)
     if (!missing(new_y)) {
       loss_trace[t] = quantile_loss(fitted, new_y)
     }
@@ -853,9 +852,22 @@ predict.gbm_cdf <- function(object, new_X, new_y, num_trees, quiet = TRUE) {
     for (k in 1:df) {
       alphas[, k] = alphas[, k] + object$shrinkage * predict(object$trees[[paste(t, k)]], new_X)
     }
+    fitted = alphas %*% t(object$design_matrix)
     
     conditions = sweep(object$constraints$A %*% t(alphas), 1, object$constraints$b, "-")
     non_mon = which(apply(conditions, 2, min) < -1e-10)
+    
+    if (FALSE) {
+      # check the linear inequaly conditions of the coefficients
+      conditions = sweep(object$constraints$A %*% t(alphas), 1, object$constraints$b, "-")
+      non_mon = which(apply(conditions, 2, min) < -1e-10)
+    } else {
+      # instead check directly for monotonicity
+      # this is less strict and should have fewer cases
+      # but I am not optimizing with the correct conditions
+      non_mon = which(apply(t(apply(fitted, 1, diff))<0, 1, any))
+    }
+    
     if (!quiet) {
       cat(length(non_mon), "alphas non-mon\n")
     }
@@ -875,7 +887,9 @@ predict.gbm_cdf <- function(object, new_X, new_y, num_trees, quiet = TRUE) {
   }
   if (!missing(new_y)) {
     best_tree = which.min(loss_trace) - 1
-    cat("Lowest loss was at tree", best_tree, "\n")
+    if (!quiet) {
+      cat("Lowest loss was at tree", best_tree, "\n")
+    }
   } else {
     best_tree = NULL
   }
@@ -888,27 +902,28 @@ predict.gbm_cdf <- function(object, new_X, new_y, num_trees, quiet = TRUE) {
 
 gbm_cdf_cv <- function(formula, X, df, max_trees = 100, shrinkage = 0.1, 
                        bag_fraction = 0.5, folds = 5, parallel = 1, quiet = TRUE) {
-  library(dplyr)
-  library(splines)
-  library(gtools)
-  library(rpart)
-  library(mgcv)
-  library(kernlab)
+  suppressMessages(library(dplyr))
+  suppressMessages(library(splines))
+  suppressMessages(library(gtools))
+  suppressMessages(library(rpart))
+  suppressMessages(library(mgcv))
+  suppressMessages(library(kernlab))
   
   if (parallel > 1) {
     suppressMessages(library(doMC))
     registerDoMC(parallel)
+  } else {
+    suppressMessages(library(foreach))
   }
   
   if (length(folds) == 1) {
     cvs = sample(folds, nrow(X), TRUE)
   } else if (length(folds) == nrow(X)) {
     cvs = folds
+    folds = max(cvs)
+  } else {
+    stop(length(folds), " ", nrow(X), " not the same")
   }
-  
-  valid_sub = sort(sample(nrow(dat_train), 250))
-  dat_valid = dat_train[valid_sub,]
-  dat_train = dat_train[-valid_sub, ]
   
   loss_trace_folds <- foreach(i=1:folds, .combine=rbind) %dopar% {
     if (!quiet) {
@@ -935,6 +950,205 @@ gbm_cdf_cv <- function(formula, X, df, max_trees = 100, shrinkage = 0.1,
   return(list(best_tree = which.min(loss_trace$Loss),
               loss_trace = loss_trace))
 }
+
+# functions for a mixture of normals ####
+dmixnorm <- function(x, params, log = FALSE) {
+  # params is a matrix with 3 columns for each component
+  # first is mean, second is log of variance, third is log of mix prob
+  if (length(x) != nrow(params)) {
+    stop("length(x) != nrow(params)")
+  }
+  if (ncol(params) %% 3 > 0) {
+    stop("params columns not mod 3")
+  }
+  
+  components = ncol(params) / 3
+  densities = matrix(NA, nrow(params), components)
+  for (k in seq_len(components)) {
+    densities[, k] = dnorm(x, 
+                           params[, (k - 1) * 3 + 1], 
+                           sqrt(exp(params[, (k - 1) * 3 + 2]))
+                           ) * 
+      exp(params[, (k - 1) * 3 + 3]) /
+      rowSums(exp(matrix(params[, (1:components - 1) * 3 + 3], nrow(params), components)))
+  }
+  
+  if (log) {
+    return(log(rowSums(densities)))
+  } else {
+    return(rowSums(densities))
+  }
+}
+
+mixnorm_gradient <- function(x, params) {
+  # Reference: Appendix A.2.3 of Matrix Cookbook by Petersen and Pedersen
+  if (length(x) != nrow(params)) {
+    stop("length(x) != nrow(params)")
+  }
+  if (ncol(params) %% 3 > 0) {
+    stop("params columns not mod 3")
+  }
+  
+  components = ncol(params) / 3
+  
+  # mix_probs = matrix(NA, nrow(params), components)
+  # for (k in 1:components) {
+  #   mix_probs[, k] = exp(params[, (k - 1) * 3 + 3]) /
+  #     rowSums(exp(matrix(params[, (1:components - 1) * 3 + 3], nrow(params), components)))
+  # }
+  mix_probs = sweep(exp(matrix(params[, (1:components - 1) * 3 + 3], nrow(params), components)), 1,
+                    rowSums(exp(matrix(params[, (1:components - 1) * 3 + 3], nrow(params), components))), "/")
+  
+  comp_densities = matrix(NA, nrow(params), components)
+  for (k in seq_len(components)) {
+    comp_densities[, k] = dnorm(x, params[, (k - 1) * 3 + 1], sqrt(exp(params[, (k - 1) * 3 + 2])))
+  }
+  # density = dmixnorm(x, params, log = FALSE)
+  density = rowSums(comp_densities * mix_probs)
+  
+  gradient = matrix(NA, nrow(params), ncol(params))
+  for (k in 1:components) {
+    comp_mus = params[, (k - 1) * 3 + 1]
+    comp_sigma2s = exp(params[, (k - 1) * 3 + 2])
+    # comp_density = dnorm(x, comp_mus, comp_sigmas)
+    
+    for (j in 1:3) {
+      if (j == 1) {
+        gradient[, (k - 1) * 3 + j] = mix_probs[, k] * comp_densities[, k] / density * 
+          (x - comp_mus) / comp_sigma2s
+      } else if (j == 2) {
+        gradient[, (k - 1) * 3 + j] = mix_probs[, k] * comp_densities[, k] / density * 
+          0.5 * ((x - comp_mus)^2 / comp_sigma2s - 1)
+      } else {
+        kron_delta = matrix((1:components == k) * 1.0, nrow(params), components, byrow = TRUE)
+        gradient[, (k - 1) * 3 + j] = 
+          rowSums(mix_probs * comp_densities / density * (kron_delta - mix_probs))
+      }
+    }
+  }
+  
+  gradient
+}
+
+mix_density_gbm <- function(formula, X, components = 1, 
+                            max_trees = 100, shrinkage = 0.1, bag_fraction = 0.5, maxdepth = 2,
+                            quiet = TRUE) {
+  # same_var = FALSE, 
+  library(rpart) # TODO: have option for multi-response tree from party
+  library(mixtools)
+  
+  # 1 write/use likelihood function (as a function of log(sigma^2), softmax?)
+  # 2 partial derivative function. Need to specify ordering
+  # 3 initialization with mixtools? Put in right order
+  df = components * 3
+  
+  if (components > 1) {
+    initial = normalmixEM(X$LOAD, k = components)
+    alpha_initial = numeric(df)
+    alpha_initial[(1:components - 1) * 3 + 1] = initial$mu
+    alpha_initial[(1:components - 1) * 3 + 2] = log(initial$sigma^2)
+    alpha_initial[(1:components - 1) * 3 + 3] = log(initial$lambda)
+  } else {
+    alpha_initial = c(mean(X$LOAD), log(var(X$LOAD)), 0)
+    
+    cat("modeling mean\n")
+    gbm_mod = gbm(LOAD ~ times + times2, data = X, distribution = "gaussian",
+                  n.trees = max_trees, shrinkage = .1, interaction.depth = 2,
+                  keep.data = FALSE, cv.folds = 4, verbose = F, n.cores = 1)
+    best.iter <- suppressWarnings(gbm.perf(gbm_mod, method="cv", plot.it = FALSE))
+    pred_gbm = predict(gbm_mod, X, n.trees = best.iter)
+    alphas = cbind(pred_gbm, log(var(X$LOAD - pred_gbm)), 0)
+  }
+  
+  # alphas = matrix(alpha_initial, nrow(X), df, byrow = TRUE)
+  loss_trace = numeric(max_trees + 1)
+  trees = list()
+  for (t in 1:max_trees) {
+    loss_trace[t] = -mean(dmixnorm(X$LOAD, alphas, log = TRUE))
+    grad_alpha = mixnorm_gradient(X$LOAD, alphas)
+    
+    if (!quiet) {
+      cat("Fitted Tree:", t, "Loss:", loss_trace[t], "\n")
+    }
+    
+    sub_sample = sample(nrow(X), nrow(X) * bag_fraction)
+    X_bag = X[sub_sample, ]
+    for (k in 1:df) {
+      # don't solve for the mixing variable if univariate gaussian
+      if (components > 1 || k != 3) {
+        X_bag$Gradient = grad_alpha[sub_sample, k]
+        tree = rpart(formula, data = X_bag, 
+                     control = rpart.control(maxdepth = maxdepth, minbucket = 10, cp = 0, maxcompete = 0, xval=0))
+        # rpart.plot::prp(tree, type = 3) # Thanks Zhou!
+        tree$where = NULL; tree$y = NULL # reduce size
+        trees[[paste(t, k)]] = tree
+        alphas[, k] = alphas[, k] + shrinkage * predict(tree, X)
+      }
+    }
+  }
+  loss_trace[t + 1] = -mean(dmixnorm(X$LOAD, alphas, log = TRUE))
+  
+  result = list(trees = trees,
+                alpha_initial = alpha_initial,
+                alphas = alphas,
+                shrinkage = shrinkage,
+                loss_trace = loss_trace)
+  class(result) = "mdgbm"
+  return(result)
+}
+
+predict.mdgbm <- function(object, new_X, new_y, num_trees, quiet = TRUE) {
+  library(rpart)
+  
+  df = length(object$alpha_initial)
+  
+  if (missing(num_trees)) {
+    num_trees = length(object$trees) / (if (df == 3) df - 1 else df)
+    if (!quiet) {
+      cat("num_trees not specified. Using all ", num_trees, " of them.\n")
+    }
+  }
+  
+  alphas = matrix(object$alpha_initial, nrow(new_X), df, byrow = TRUE)
+  loss_trace = rep(NA, num_trees + 1)
+  for (t in 1:num_trees) {
+    if (!missing(new_y)) {
+      loss_trace[t] = -mean(dmixnorm(new_y, alphas, log = TRUE))
+    }
+    
+    if (!quiet) {
+      cat("Prediction Tree:", t)
+      if (!missing(new_y)) {
+        cat(" Loss:", loss_trace[t], "\n")
+      } else {
+        cat("\n")
+      }
+    }
+    
+    for (k in 1:df) {
+      # don't solve for the mixing variable if univariate gaussian
+      if (components > 1 || k != 3) {
+        alphas[, k] = alphas[, k] + object$shrinkage * predict(object$trees[[paste(t, k)]], new_X)
+      }
+    }
+  }
+  if (!missing(new_y)) {
+    loss_trace[t+1] = -mean(dmixnorm(new_y, alphas, log = TRUE))
+  }
+  if (!missing(new_y)) {
+    best_tree = which.min(loss_trace) - 1
+    if (!quiet) {
+      cat("Lowest loss was at tree", best_tree, "\n")
+    }
+  } else {
+    best_tree = NULL
+  }
+  
+  return(list(alphas = alphas,
+              best_tree = best_tree,
+              loss_trace = loss_trace))
+}
+
 
 # in a separate file because it has my phone number
 source("send_text_function.R")

@@ -991,93 +991,115 @@ mixnorm_gradient <- function(x, params) {
   
   components = ncol(params) / 3
   
-  # mix_probs = matrix(NA, nrow(params), components)
-  # for (k in 1:components) {
-  #   mix_probs[, k] = exp(params[, (k - 1) * 3 + 3]) /
-  #     rowSums(exp(matrix(params[, (1:components - 1) * 3 + 3], nrow(params), components)))
-  # }
-  mix_probs = sweep(exp(matrix(params[, (1:components - 1) * 3 + 3], nrow(params), components)), 1,
-                    rowSums(exp(matrix(params[, (1:components - 1) * 3 + 3], nrow(params), components))), "/")
-  
-  comp_densities = matrix(NA, nrow(params), components)
-  for (k in seq_len(components)) {
-    comp_densities[, k] = dnorm(x, params[, (k - 1) * 3 + 1], sqrt(exp(params[, (k - 1) * 3 + 2])))
-  }
-  # density = dmixnorm(x, params, log = FALSE)
-  density = rowSums(comp_densities * mix_probs)
-  
-  gradient = matrix(NA, nrow(params), ncol(params))
-  for (k in 1:components) {
-    comp_mus = params[, (k - 1) * 3 + 1]
-    comp_sigma2s = exp(params[, (k - 1) * 3 + 2])
-    # comp_density = dnorm(x, comp_mus, comp_sigmas)
+  if (components > 0) {
+    mix_probs = sweep(exp(matrix(params[, (1:components - 1) * 3 + 3], nrow(params), components)), 1,
+                      rowSums(exp(matrix(params[, (1:components - 1) * 3 + 3], nrow(params), components))), "/")
     
-    for (j in 1:3) {
-      if (j == 1) {
-        gradient[, (k - 1) * 3 + j] = mix_probs[, k] * comp_densities[, k] / density * 
-          (x - comp_mus) / comp_sigma2s
-      } else if (j == 2) {
-        gradient[, (k - 1) * 3 + j] = mix_probs[, k] * comp_densities[, k] / density * 
-          0.5 * ((x - comp_mus)^2 / comp_sigma2s - 1)
-      } else {
-        kron_delta = matrix((1:components == k) * 1.0, nrow(params), components, byrow = TRUE)
-        gradient[, (k - 1) * 3 + j] = 
-          rowSums(mix_probs * comp_densities / density * (kron_delta - mix_probs))
+    comp_densities = matrix(NA, nrow(params), components)
+    for (k in seq_len(components)) {
+      comp_densities[, k] = dnorm(x, params[, (k - 1) * 3 + 1], sqrt(exp(params[, (k - 1) * 3 + 2])))
+    }
+    density = rowSums(comp_densities * mix_probs)
+    
+    gradient = matrix(NA, nrow(params), ncol(params))
+    for (k in 1:components) {
+      comp_mus = params[, (k - 1) * 3 + 1]
+      comp_sigma2s = exp(params[, (k - 1) * 3 + 2])
+      
+      for (j in 1:3) {
+        if (j == 1) {
+          gradient[, (k - 1) * 3 + j] = mix_probs[, k] * comp_densities[, k] / density * 
+            (x - comp_mus) / comp_sigma2s
+        } else if (j == 2) {
+          gradient[, (k - 1) * 3 + j] = mix_probs[, k] * comp_densities[, k] / density * 
+            0.5 * ((x - comp_mus)^2 / comp_sigma2s - 1)
+        } else {
+          kron_delta = matrix((1:components == k) * 1.0, nrow(params), components, byrow = TRUE)
+          gradient[, (k - 1) * 3 + j] = 
+            rowSums(mix_probs * comp_densities / density * (kron_delta - mix_probs))
+        }
       }
     }
+  } else {
+    # used second order information for 1 component
+    # doesn't work well bc it gives large negative values for variance gradient
+    gradient = matrix(0, nrow(params), ncol(params))
+    gradient[, 1] = x - params[, 1]
+    gradient[, 2] = 1 - exp(params[, 2]) / (x - params[, 1])^2
   }
   
   gradient
 }
 
-mix_density_gbm <- function(formula, X, components = 1, 
+mix_density_gbm <- function(formula, X, components = 1, fresh_start = FALSE,
                             max_trees = 100, shrinkage = 0.1, bag_fraction = 0.5, maxdepth = 2,
                             quiet = TRUE) {
   # same_var = FALSE, 
   library(rpart) # TODO: have option for multi-response tree from party
+  suppressMessages(library(gbm))
   library(mixtools)
   
-  # 1 write/use likelihood function (as a function of log(sigma^2), softmax?)
-  # 2 partial derivative function. Need to specify ordering
-  # 3 initialization with mixtools? Put in right order
+  # Parse formula 
+  resp_name = attr(attr(terms(formula), "factors"), "dimnames")[[1]][1]
+  indep_vars = attr(attr(terms(formula), "factors"), "dimnames")[[2]]
+  gradient_formula = formula(paste("Gradient ~",paste(formula)[3]))
+  X = subset(X, select = c(resp_name, indep_vars))
+  
   df = components * 3
+  n = nrow(X)
+  
+  if (!quiet) {
+    cat("Initializing\n")
+  }
+  if (!fresh_start) {
+    gbm_start = gbm(formula, data = X, distribution = "gaussian",
+                  n.trees = 500, shrinkage = shrinkage, interaction.depth = maxdepth,
+                  keep.data = FALSE, cv.folds = 4, verbose = F)
+    best_iter <- suppressWarnings(gbm.perf(gbm_start, method="cv", plot.it = FALSE))
+    pred_mean = predict(gbm_start, X, n.trees = best_iter)
+    response = X[, resp_name] - pred_mean
+  } else {
+    gbm_start = NULL
+    best_iter = NULL
+    # pred_mean = rep(0, n)
+    response = X[, resp_name]
+  }
   
   if (components > 1) {
-    initial = normalmixEM(X$LOAD, k = components)
+    initial = suppressMessages(normalmixEM(response, k = components))
     alpha_initial = numeric(df)
     alpha_initial[(1:components - 1) * 3 + 1] = initial$mu
     alpha_initial[(1:components - 1) * 3 + 2] = log(initial$sigma^2)
     alpha_initial[(1:components - 1) * 3 + 3] = log(initial$lambda)
   } else {
-    alpha_initial = c(mean(X$LOAD), log(var(X$LOAD)), 0)
-    
-    cat("modeling mean\n")
-    gbm_mod = gbm(LOAD ~ times + times2, data = X, distribution = "gaussian",
-                  n.trees = max_trees, shrinkage = .1, interaction.depth = 2,
-                  keep.data = FALSE, cv.folds = 4, verbose = F, n.cores = 1)
-    best.iter <- suppressWarnings(gbm.perf(gbm_mod, method="cv", plot.it = FALSE))
-    pred_gbm = predict(gbm_mod, X, n.trees = best.iter)
-    alphas = cbind(pred_gbm, log(var(X$LOAD - pred_gbm)), 0)
+    alpha_initial = c(mean(response), log(var(response)), 0)
   }
   
-  # alphas = matrix(alpha_initial, nrow(X), df, byrow = TRUE)
+  alphas = matrix(alpha_initial, n, df, byrow = TRUE)
+  if (!fresh_start) {
+    # add the mean back in
+    alphas[, (1:components - 1) * 3 + 1] = 
+      alphas[, (1:components - 1) * 3 + 1] + pred_mean
+    response = X[, resp_name]    
+  }
+  
   loss_trace = numeric(max_trees + 1)
   trees = list()
   for (t in 1:max_trees) {
-    loss_trace[t] = -mean(dmixnorm(X$LOAD, alphas, log = TRUE))
-    grad_alpha = mixnorm_gradient(X$LOAD, alphas)
+    loss_trace[t] = -mean(dmixnorm(response, alphas, log = TRUE))
+    grad_alpha = mixnorm_gradient(response, alphas)
     
     if (!quiet) {
       cat("Fitted Tree:", t, "Loss:", loss_trace[t], "\n")
     }
     
-    sub_sample = sample(nrow(X), nrow(X) * bag_fraction)
+    sub_sample = sample(n, n * bag_fraction)
     X_bag = X[sub_sample, ]
     for (k in 1:df) {
       # don't solve for the mixing variable if univariate gaussian
       if (components > 1 || k != 3) {
         X_bag$Gradient = grad_alpha[sub_sample, k]
-        tree = rpart(formula, data = X_bag, 
+        tree = rpart(gradient_formula, data = X_bag, 
                      control = rpart.control(maxdepth = maxdepth, minbucket = 10, cp = 0, maxcompete = 0, xval=0))
         # rpart.plot::prp(tree, type = 3) # Thanks Zhou!
         tree$where = NULL; tree$y = NULL # reduce size
@@ -1086,10 +1108,12 @@ mix_density_gbm <- function(formula, X, components = 1,
       }
     }
   }
-  loss_trace[t + 1] = -mean(dmixnorm(X$LOAD, alphas, log = TRUE))
+  loss_trace[t + 1] = -mean(dmixnorm(response, alphas, log = TRUE))
   
   result = list(trees = trees,
                 alpha_initial = alpha_initial,
+                gbm_start = gbm_start,
+                best_iter = best_iter,
                 alphas = alphas,
                 shrinkage = shrinkage,
                 loss_trace = loss_trace)
@@ -1099,8 +1123,22 @@ mix_density_gbm <- function(formula, X, components = 1,
 
 predict.mdgbm <- function(object, new_X, new_y, num_trees, quiet = TRUE) {
   library(rpart)
+  suppressMessages(library(gbm))
   
+  fresh_start = is.null(object$best_iter)
+  
+  n = nrow(new_X)
   df = length(object$alpha_initial)
+  components = df / 3
+  
+  alphas = matrix(object$alpha_initial, n, df, byrow = TRUE)
+  if (!fresh_start) {
+    # add the mean back in
+    pred_mean = predict(object$gbm_start, new_X, n.trees = object$best_iter)
+    
+    alphas[, (1:components - 1) * 3 + 1] = 
+      alphas[, (1:components - 1) * 3 + 1] + pred_mean
+  }
   
   if (missing(num_trees)) {
     num_trees = length(object$trees) / (if (df == 3) df - 1 else df)
@@ -1109,7 +1147,7 @@ predict.mdgbm <- function(object, new_X, new_y, num_trees, quiet = TRUE) {
     }
   }
   
-  alphas = matrix(object$alpha_initial, nrow(new_X), df, byrow = TRUE)
+  
   loss_trace = rep(NA, num_trees + 1)
   for (t in 1:num_trees) {
     if (!missing(new_y)) {
@@ -1146,6 +1184,58 @@ predict.mdgbm <- function(object, new_X, new_y, num_trees, quiet = TRUE) {
   
   return(list(alphas = alphas,
               best_tree = best_tree,
+              loss_trace = loss_trace))
+}
+
+gbm_mix_density_cv <- function(formula, X, components = 1, fresh_start = FALSE, max_trees = 100, shrinkage = 0.1, 
+                       bag_fraction = 0.5, maxdepth = 2, folds = 5, parallel = 1, quiet = TRUE) {
+  suppressMessages(library(dplyr))
+  suppressMessages(library(rpart))
+  suppressMessages(library(mixtools))
+  suppressMessages(library(gbm))
+  
+  if (parallel > 1) {
+    suppressMessages(library(doMC))
+    registerDoMC(parallel)
+  } else {
+    suppressMessages(library(foreach))
+  }
+  
+  resp_name = attr(attr(terms(formula), "factors"), "dimnames")[[1]][1]
+  
+  if (length(folds) == 1) {
+    cvs = sample(folds, nrow(X), TRUE)
+  } else if (length(folds) == nrow(X)) {
+    cvs = folds
+    folds = max(cvs)
+  } else {
+    stop(length(folds), " ", nrow(X), " not the same")
+  }
+  
+  loss_trace_folds <- foreach(i=1:folds, .combine=rbind) %dopar% {
+    if (!quiet) {
+      cat("Fold", i, "\n")
+    }
+    dat_valid = X[cvs == i, ]
+    dat_train = X[cvs != i, ]
+    
+    model = mix_density_gbm(formula, dat_train, components, fresh_start, max_trees, 
+                            shrinkage, bag_fraction, maxdepth, TRUE)
+    preds = predict.mdgbm(model, dat_valid, dat_valid[, resp_name], max_trees, TRUE)
+    
+    data.frame(Trees = 1:max_trees, 
+               Loss = preds$loss_trace[-1], 
+               Weight = nrow(dat_valid))
+  }
+  
+  # combine the different folds
+  loss_trace <- tbl_df(loss_trace_folds) %>%
+    mutate(LossWeight = Loss * Weight) %>%
+    group_by(Trees) %>%
+    summarise(Loss = sum(LossWeight) / sum(Weight)) %>%
+    arrange(Trees)
+  
+  return(list(best_tree = which.min(loss_trace$Loss),
               loss_trace = loss_trace))
 }
 

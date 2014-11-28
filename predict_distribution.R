@@ -2,7 +2,7 @@
 args = commandArgs(TRUE)
 if (length(args)<1) {args[1]="a"}
 if (length(args)<2) {args[2]="4"}
-if (length(args)<3) {args[3]="100"}
+if (length(args)<3) {args[3]="500"}
 if (length(args)<4) {args[4]="1e6"}
 
 if (substring(args[1],1,1)=="e") {
@@ -27,9 +27,9 @@ source("gef2014_functions.R")
 load("weather_pca4.RData")
 load(paste0("lag", 0, "_load_models_gbm9.RData")) # for quantiles
 
-set.seed(20141104)
-pred_begin_datetime = ymd(20110801)+hours(1)
-pred_end_datetime = ymd(20110901)
+set.seed(20141111)
+pred_begin_datetime = ymd(20111001)+hours(1)
+pred_end_datetime = ymd(20111101)
 
 cat("\nSimulating weather data\n")
 weather_sims1 = simulate_weather_pca(pred_begin_datetime = pred_begin_datetime, 
@@ -119,5 +119,5 @@ if (parallel > 1) {
 cat("Time:", as.numeric(proc.time() - start_time)[3]/60, "minutes")
 
 pred_distribution = data.frame(DateTime = weather_sims1$DateTime, pred_distribution)
-write.csv(pred_distribution, paste0("pred11_", paste(args,collapse = "_"), "_old.csv"), 
+write.csv(pred_distribution, paste0("pred13_", paste(args,collapse = "_"), "_old.csv"), 
           row.names=FALSE)

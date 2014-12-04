@@ -28,8 +28,8 @@ load("weather_pca4.RData")
 load(paste0("lag", 0, "_load_models_gbm9.RData")) # for quantiles
 
 set.seed(20141125)
-pred_begin_datetime = ymd(20111101)+hours(1)
-pred_end_datetime = ymd(20111201)
+pred_begin_datetime = ymd(20111201)+hours(1)
+pred_end_datetime = ymd(20120101)
 
 cat("\nSimulating weather data\n")
 weather_sims1 = simulate_weather_pca(pred_begin_datetime = pred_begin_datetime, 
@@ -119,5 +119,5 @@ if (parallel > 1) {
 cat("Time:", as.numeric(proc.time() - start_time)[3]/60, "minutes")
 
 pred_distribution = data.frame(DateTime = weather_sims1$DateTime, pred_distribution)
-write.csv(pred_distribution, paste0("pred14_", paste(args,collapse = "_"), "_old.csv"), 
+write.csv(pred_distribution, paste0("pred15_", paste(args,collapse = "_"), "_old.csv"), 
           row.names=FALSE)

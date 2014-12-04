@@ -27,9 +27,9 @@ source("gef2014_functions.R")
 load("weather_pca4.RData")
 load(paste0("lag", 0, "_load_models_gbm9.RData")) # for quantiles
 
-set.seed(20141111)
-pred_begin_datetime = ymd(20111001)+hours(1)
-pred_end_datetime = ymd(20111101)
+set.seed(20141125)
+pred_begin_datetime = ymd(20111101)+hours(1)
+pred_end_datetime = ymd(20111201)
 
 cat("\nSimulating weather data\n")
 weather_sims1 = simulate_weather_pca(pred_begin_datetime = pred_begin_datetime, 
@@ -44,7 +44,7 @@ weather_sims1 <- add_holidays(weather_sims1)
 
 sim_columns = grep("Sim", colnames(weather_sims1))
 weather_sims_m1 = melt(weather_sims1, measure.vars = sim_columns,
-                      value.name = "wPCA1")
+                       value.name = "wPCA1")
 # sim_columns = grep("Sim", colnames(weather_sims2))
 # weather_sims_m2 = melt(weather_sims2, measure.vars = sim_columns,
 #                        value.name = "wPCA2")
@@ -119,5 +119,5 @@ if (parallel > 1) {
 cat("Time:", as.numeric(proc.time() - start_time)[3]/60, "minutes")
 
 pred_distribution = data.frame(DateTime = weather_sims1$DateTime, pred_distribution)
-write.csv(pred_distribution, paste0("pred13_", paste(args,collapse = "_"), "_old.csv"), 
+write.csv(pred_distribution, paste0("pred14_", paste(args,collapse = "_"), "_old.csv"), 
           row.names=FALSE)

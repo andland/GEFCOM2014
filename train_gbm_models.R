@@ -22,6 +22,6 @@ gbms = train_load_models_gbm(quantiles = quantiles, weather_pca = weather_pca,
 # assign(paste0("gbms", lag), gbms)
 
 save(list = c(paste0("gbms"), "quantiles"), 
-     file = paste0("lag", lag, "_load_models_gbm9.RData"))
+     file = paste0("lag", lag, "_load_models_gbm12.RData"))
 
 send.text(paste("Lag", lag, "GBMs done training"))
